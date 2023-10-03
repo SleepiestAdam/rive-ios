@@ -29,6 +29,7 @@ Pod::Spec.new do |spec|
   spec.authors = { "Luigi Rosso" => "luigi@rive.app" }
   spec.ios.deployment_target  = '14.0'
   spec.osx.deployment_target  = '13.1'
+  spec.tvos.deployment_target = '17.0'
   spec.swift_version          = '5.0'
   spec.source       = { 
     :http => "https://github.com/rive-app/rive-ios/releases/download/5.3.1/RiveRuntime.xcframework.zip",
