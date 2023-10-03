@@ -3,7 +3,7 @@ import PackageDescription
 
 let package = Package(
     name: "RiveRuntime",
-    platforms: [.iOS("14.0"), .macOS("13.1")],
+    platforms: [.iOS("14.0"), .macOS("13.1"), .tvOS("17.0")],
     products: [
         .library(
             name: "RiveRuntime",
