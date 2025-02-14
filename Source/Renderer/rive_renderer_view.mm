@@ -351,55 +351,73 @@
     }
 #endif
 
-    // Perform rendering on background queue
-    dispatch_async(_renderQueue, ^{
-        if ([_renderContext canDrawInRect:rect
-                            drawableSize:self.drawableSize
-                                   scale:scale] == NO)
-        {
-            return;
-        }
+    // If we're on the main thread, dispatch to background
+    if ([NSThread isMainThread]) {
+        dispatch_async(_renderQueue, ^{
+            [self drawInRect:rect withCompletion:completionHandler];
+        });
+        return;
+    }
 
-        // Get drawable on background thread
-        id<CAMetalDrawable> drawable = [self currentDrawable];
-        if (!drawable.texture)
-        {
-            return;
-        }
+    // Check if we can draw
+    if ([_renderContext canDrawInRect:rect
+                        drawableSize:self.drawableSize
+                               scale:scale] == NO)
+    {
+        return;
+    }
 
-        _renderer = [_renderContext beginFrame:self];
-        if (_renderer != nil)
-        {
-            _renderer->save();
-            [self drawRive:rect size:self.drawableSize];
-            _renderer->restore();
+    // Get drawable (now with retry logic built into currentDrawable)
+    id<CAMetalDrawable> drawable = [self currentDrawable];
+    if (!drawable.texture)
+    {
+        // If we couldn't get a drawable, schedule another draw
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self setNeedsDisplay:YES];
+        });
+        return;
+    }
+
+    _renderer = [_renderContext beginFrame:self];
+    if (_renderer != nil)
+    {
+        _renderer->save();
+        [self drawRive:rect size:self.drawableSize];
+        _renderer->restore();
+    }
+    
+    // Complete rendering and present
+    [_renderContext endFrame:self withCompletion:^(id<MTLCommandBuffer> _Nonnull buffer) {
+        // Handle completion on main thread if needed
+        if (completionHandler) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                completionHandler(buffer);
+            });
         }
         
-        // Complete rendering and present
-        [_renderContext endFrame:self withCompletion:^(id<MTLCommandBuffer> _Nonnull buffer) {
-            // Handle completion on main thread if needed
-            if (completionHandler) {
-                dispatch_async(dispatch_get_main_queue(), ^{
-                    completionHandler(buffer);
-                });
-            }
-            
-            // Update view state on main thread
-            dispatch_async(dispatch_get_main_queue(), ^{
-                bool paused = [self isPaused];
-                [self setEnableSetNeedsDisplay:paused];
-                [self setPaused:paused];
-            });
-        }];
+        // Update view state on main thread
+        dispatch_async(dispatch_get_main_queue(), ^{
+            bool paused = [self isPaused];
+            [self setEnableSetNeedsDisplay:paused];
+            [self setPaused:paused];
+        });
+    }];
 
-        _renderer = nil;
-    });
+    _renderer = nil;
 }
 
 - (void)drawRect:(CGRect)rect
 {
     [super drawRect:rect];
-
+    
+    // If we're on the main thread, dispatch to background
+    if ([NSThread isMainThread]) {
+        dispatch_async(_renderQueue, ^{
+            [self drawInRect:rect withCompletion:NULL];
+        });
+        return;
+    }
+    
     [self drawInRect:rect withCompletion:NULL];
 }
 
@@ -508,12 +526,16 @@
     return CGPointMake(convertedLocation.x, convertedLocation.y);
 }
 
-// Update currentDrawable implementation to be thread-safe
+// Update currentDrawable implementation to avoid blocking main thread
 - (nullable id<CAMetalDrawable>)currentDrawable
 {
-    if (_currentDrawable == nil)
-    {
-        // Use a semaphore to wait for the drawable with a timeout
+    // If we're on the main thread, return immediately to avoid blocking
+    if ([NSThread isMainThread]) {
+        return [self metalLayer].nextDrawable;
+    }
+    
+    // If we're already on a background thread, we can try a few times with shorter timeouts
+    for (int attempt = 0; attempt < 3; attempt++) {
         dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
         __block id<CAMetalDrawable> drawable = nil;
         
@@ -522,12 +544,15 @@
             dispatch_semaphore_signal(semaphore);
         });
         
-        // Wait with timeout to avoid deadlock
-        if (dispatch_semaphore_wait(semaphore, dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC)) == 0) {
-            _currentDrawable = drawable;
+        // Use a shorter timeout (16ms = roughly one frame)
+        if (dispatch_semaphore_wait(semaphore, dispatch_time(DISPATCH_TIME_NOW, 16 * NSEC_PER_MSEC)) == 0) {
+            if (drawable) {
+                return drawable;
+            }
         }
     }
-    return _currentDrawable;
+    
+    return nil;
 }
 
 @end
